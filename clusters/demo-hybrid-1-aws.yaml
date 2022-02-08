@@ -1,0 +1,205 @@
+kind: Cluster
+metadata:
+  name: demo-hybrid-1-aws
+  space: default
+spec:
+  features:
+    ingress:
+      chart:
+        version: 1.21.2-24
+      ingressControllers:
+        - nginx:
+            enabled: true
+            acme:
+              enabled: false
+      values:
+        nginx-ingress:
+          controller:
+            service:
+              annotations:
+                service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    kubedb:
+      chart:
+        version: 1.21.2-25
+      enabled: false
+    kublrOperator:
+      chart:
+        version: 1.21.2-32
+      enabled: true
+    logging:
+      chart:
+        version: 1.21.2-37
+      logCollection:
+        enabled: false
+      sinks:
+        - selfHosted:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: false
+            masterNodes: 1
+        - centralLogging:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: true
+            logstashReplicas: 1
+            masterNodes: 1
+            persistent: true
+            size: 128G
+    monitoring:
+      chart:
+        version: 1.21.2-28
+      enabled: true
+      platformClient:
+        enabled: true
+        prometheus:
+          persistent: false
+    system:
+      chart:
+        version: 1.21.2-30
+  kublrAgentTgzUrl: 'https://repo.kublr.com/repository/gobinaries/kublr/1.20.9-18/kublr-1.20.9-18-linux.tar.gz'
+  locations:
+    - aws:
+        awsApiAccessSecretRef: aws
+        enableTerminationProtection: false
+        region: us-east-1
+        resourcesCloudFormationExtras:
+          SgDefaultSubmariner500:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 500
+              ToPort: 500
+          SgDefaultSubmariner4490:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 4490
+              ToPort: 4490
+          SgDefaultSubmariner4500:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 4500
+              ToPort: 4500
+      name: aws1
+  master:
+    kublrAgentConfig:
+      kublr:
+        psp:
+          default_clusterrole: 'psp:privileged'
+    kublrVariant: aws-ubuntu-20.04
+    locations:
+      - aws:
+          availabilityZones:
+            - us-east-1a
+          groupType: asg-mip
+          instanceMonitoring: false
+          instanceType: m5.large
+          mixedInstancesPolicyCloudFormationExtras:
+            InstancesDistribution:
+              OnDemandPercentageAboveBaseCapacity: 0
+            LaunchTemplate:
+              Overrides:
+                - InstanceType: m5.large
+                - InstanceType: t3.large
+          rootVolume:
+            size: 40
+          sshKey: cloudify
+          subnetIds:
+            - ''
+        locationRef: aws1
+    minNodes: 1
+  network:
+    apiServerSecurePort: 6443
+    clusterCIDR: 100.64.0.0/10
+    dnsDomain: cluster1.local
+    enableLocalDns: false
+    provider: cni-flannel
+    stubDomains:
+      - dns: cluster2.local
+        servers:
+          - 100.128.0.10
+  nodes:
+    - autoscaling: false
+      kublrVariant: aws-ubuntu-20.04
+      name: group1
+      minNodes: 2
+      stateful: true
+      kublrAgentConfig:
+        labels:
+          submariner.io/gateway: 'true'
+      locations:
+        - locationRef: aws1
+          aws:
+            availabilityZones:
+              - us-east-1a
+              - us-east-1b
+            groupType: asg-mip
+            instanceMonitoring: false
+            instanceType: m5.xlarge
+            mixedInstancesPolicyCloudFormationExtras:
+              InstancesDistribution:
+                OnDemandPercentageAboveBaseCapacity: 0
+              LaunchTemplate:
+                Overrides:
+                  - InstanceType: m5.xlarge
+                  - InstanceType: t3.xlarge
+            pinToZone: pin
+            rootVolume:
+              size: 40
+            sshKey: cloudify
+            subnetIds:
+              - ''
+              - ''
+  packages:
+    submariner-broker:
+      helmVersion: '3.4.0'
+      namespace: submariner-k8s-broker
+      releaseName: submariner-k8s-broker
+      chart:
+        name: submariner-k8s-broker
+        url: https://submariner-io.github.io/submariner-charts/charts/submariner-k8s-broker-0.11.0.tgz
+      values:
+        submariner:
+          serviceDiscovery: false
+    submariner-additional-configuration:
+      helmVersion: '3.4.0'
+      namespace: kube-system
+      releaseName: submariner-additional-configuration
+      chart:
+        name: raw
+        url: https://github.com/itscontained/charts/releases/download/raw-v0.2.5/raw-v0.2.5.tgz
+      values:
+        resources:
+          -
+            apiVersion: batch/v1beta1
+            kind: CronJob
+            metadata:
+              name: submariner-label-nodes
+            spec:
+              schedule: "*/1 * * * *"
+              successfulJobsHistoryLimit: 1
+              jobTemplate:
+                spec:
+                  template:
+                    spec:
+                      serviceAccountName: tiller
+                      restartPolicy: OnFailure
+                      containers:
+                        - name: label-nodes
+                          image: cr.kublr.com/bitnami/kubectl:1.21.5
+                          command:
+                            - sh
+                            - -c
+                            - |
+                              kubectl label nodes -l kublr.io/node-group=group1 --overwrite submariner.io/gateway=true
+                              for n in $(kubectl get nodes -l kublr.io/node-group=group1 -o name) ; do
+                                echo $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                                kubectl annotate --overwrite $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                              done

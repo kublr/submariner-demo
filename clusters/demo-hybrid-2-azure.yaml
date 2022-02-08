@@ -1,0 +1,213 @@
+kind: Cluster
+metadata:
+  name: demo-hybrid-2-azure
+  space: default
+spec:
+  features:
+    ingress:
+      chart:
+        version: 1.21.2-24
+      ingressControllers:
+        - nginx:
+            enabled: true
+            acme:
+              enabled: false
+    kubedb:
+      chart:
+        version: 1.21.2-25
+      enabled: false
+    kublrOperator:
+      chart:
+        version: 1.21.2-32
+      enabled: true
+    logging:
+      chart:
+        version: 1.21.2-37
+      logCollection:
+        enabled: false
+      sinks:
+        - selfHosted:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: false
+            masterNodes: 1
+        - centralLogging:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: true
+            logstashReplicas: 1
+            masterNodes: 1
+            persistent: true
+            size: 128G
+    monitoring:
+      chart:
+        version: 1.21.2-28
+      enabled: true
+      platformClient:
+        enabled: true
+        prometheus:
+          persistent: false
+    system:
+      chart:
+        version: 1.21.2-30
+  kublrAgentTgzUrl: 'https://repo.kublr.com/repository/gobinaries/kublr/1.20.9-18/kublr-1.20.9-18-linux.tar.gz'
+  locations:
+    - azure:
+        armTemplateExtras:
+          securityGroup:
+            properties:
+              securityRules:
+                - name: submariner
+                  properties:
+                    description: Allow UDP traffic for submariner IPSec VPN
+                    protocol: Udp
+                    sourcePortRange: '*'
+                    sourceAddressPrefix: '*'
+                    destinationPortRanges: [500, 4490, 4500]
+                    destinationApplicationSecurityGroups:
+                      - id: "[resourceId('Microsoft.Network/applicationSecurityGroups', variables('k8sMasterApplicationSecurityGroup'))]"
+                    access: Allow
+                    priority: 200
+                    direction: Inbound
+        azureApiAccessSecretRef: azure
+        region: eastus
+        virtualNetworkSubnetCidrBlock: 172.18.0.0/16
+      name: azure1
+  master:
+    kublrAgentConfig:
+      kublr:
+        psp:
+          default_clusterrole: 'psp:privileged'
+    locations:
+      - azure:
+          armTemplateExtras:
+            scaleSet:
+              apiVersion: '2021-07-01'
+              properties:
+                singlePlacementGroup: false
+                virtualMachineProfile:
+                  priority: Spot
+                  evictionPolicy: Delete
+                  billingProfile:
+                    maxPrice: -1
+                spotRestorePolicy:
+                  enabled: true
+                  restoreTimeout: P2D
+          groupType: VirtualMachineScaleSet
+          instanceType: Standard_D4s_v4
+          masterDataDisk:
+            lun: 1
+            diskSizeGb: 15
+          masterLBAllocationPolicy: privateAndPublic
+          masterLBSeparate: false
+          osDisk:
+            diskSizeGb: 40
+            imageOffer: 0001-com-ubuntu-server-focal
+            imagePublisher: Canonical
+            imageVersion: 20_04-lts
+            type: image
+          pinToZone: pin
+          sshKeySecretRef: ssh-pub
+          zones:
+            - '1'
+        locationRef: azure1
+    minNodes: 1
+  network:
+    apiServerSecurePort: 6443
+    clusterCIDR: 100.128.0.0/10
+    dnsDomain: cluster2.local
+    enableLocalDns: false
+    provider: cni-flannel
+    stubDomains:
+      - dns: cluster1.local
+        servers:
+          - 100.64.0.10
+  nodes:
+    - autoscaling: false
+      name: group1
+      minNodes: 2
+      stateful: true
+      kublrAgentConfig:
+        labels:
+          submariner.io/gateway: 'true'
+      locations:
+        - locationRef: azure1
+          azure:
+            armTemplateExtras:
+              ipConfiguration:
+                properties:
+                  publicIPAddressConfiguration:
+                    name: pubIP
+                    properties:
+                      idleTimeoutInMinutes: 15
+              scaleSet:
+                apiVersion: '2021-07-01'
+                properties:
+                  singlePlacementGroup: false
+                  virtualMachineProfile:
+                    priority: Spot
+                    evictionPolicy: Delete
+                    billingProfile:
+                      maxPrice: -1
+                  spotRestorePolicy:
+                    enabled: true
+                    restoreTimeout: P2D
+            groupType: VirtualMachineScaleSet
+            instanceType: Standard_D4s_v4
+            osDisk:
+              diskSizeGb: 40
+              imageOffer: 0001-com-ubuntu-server-focal
+              imagePublisher: Canonical
+              imageVersion: 20_04-lts
+              type: image
+            pinToZone: pin
+            sshKeySecretRef: ssh-pub
+            zones:
+              - '1'
+              - '2'
+  packages:
+    submariner-broker:
+      helmVersion: '3.4.0'
+      namespace: submariner-k8s-broker
+      releaseName: submariner-k8s-broker
+      chart:
+        name: submariner-k8s-broker
+        url: https://submariner-io.github.io/submariner-charts/charts/submariner-k8s-broker-0.11.0.tgz
+      values:
+        submariner:
+          serviceDiscovery: false
+    submariner-additional-configuration:
+      helmVersion: '3.4.0'
+      namespace: kube-system
+      releaseName: submariner-additional-configuration
+      chart:
+        name: raw
+        url: https://github.com/itscontained/charts/releases/download/raw-v0.2.5/raw-v0.2.5.tgz
+      values:
+        resources:
+          -
+            apiVersion: batch/v1beta1
+            kind: CronJob
+            metadata:
+              name: submariner-label-nodes
+            spec:
+              schedule: "*/1 * * * *"
+              successfulJobsHistoryLimit: 1
+              jobTemplate:
+                spec:
+                  template:
+                    spec:
+                      serviceAccountName: tiller
+                      restartPolicy: OnFailure
+                      containers:
+                        - name: label-nodes
+                          image: cr.kublr.com/bitnami/kubectl:1.21.5
+                          command:
+                            - sh
+                            - -c
+                            - |
+                              kubectl label nodes -l kublr.io/node-group=group1 --overwrite submariner.io/gateway=true
+                              for n in $(kubectl get nodes -l kublr.io/node-group=group1 -o name) ; do
+                                echo $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                                kubectl annotate --overwrite $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                              done
