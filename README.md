@@ -4,7 +4,7 @@
 * jq
 * kubectl 1.21+
 
-# 2. Deploy cluster
+# 2. Deploy k8s clusters
 
 Create `aws` and `azure` secret credentials in `default` space using Kublr UI or API.
 
@@ -13,11 +13,9 @@ from the files `clusters/demo-hybrid-1-aws.yaml` and `clusters/demo-hybrid-2-azu
 
 Wait for all statuses become green, including 2 packages in the end of the status page - `submariner-additional-configuration`, `submariner-broker`.
 
-Download the cluster' kubeconfig files from Kublr UI or API and save them in your current work directory under names `config1aws` and `config2az`.
-
 # 3. Download clusters' kubeconfig files
 
-Save the clusters' kubeconfig files as `config1aws` and `config2az`.
+Download the clusters' kubeconfig files from Kublr UI or API and save them in your current work directory as `config1aws` and `config2az`.
 
 Verify that the clusters are available for CLI tools:
 
@@ -239,7 +237,7 @@ for C2 in config1aws config2az ; do
 done
 ```
 
-## 5.4. Test pod-to-service-name connections:
+## 5.4. Test pod-to-service-name connections
 
 ```
 for C2 in cluster1.local cluster2.local ; do
